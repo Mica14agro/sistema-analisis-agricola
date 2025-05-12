@@ -3,7 +3,10 @@ import pandas as pd
 import numpy as np
 import time
 import json
-import random
+import re
+import requests
+import zipfile
+from io import BytesIO
 
 # Intentar importar folium y streamlit_folium
 try:
@@ -13,751 +16,478 @@ try:
 except ImportError:
     folium_disponible = False
 
-# Intentar importar matplotlib
-try:
-    import matplotlib.pyplot as plt
-    matplotlib_disponible = True
-except ImportError:
-    matplotlib_disponible = False
-
 # Configuración de la página
 st.set_page_config(
-    page_title="Sistema de Análisis Agrícola",
+    page_title="Consulta RENSPA - SENASA",
     page_icon="🌱",
     layout="wide"
 )
 
+# Configuraciones globales
+API_BASE_URL = "https://aps.senasa.gob.ar/restapiprod/servicios/renspa"
+TIEMPO_ESPERA = 0.5  # Pausa entre peticiones para no sobrecargar la API
+
 # Título principal
-st.title("Sistema de Análisis Agrícola - RENSPA")
+st.title("Consulta RENSPA desde SENASA")
 
 # Introducción
 st.markdown("""
-Este sistema automatiza el análisis de datos agrícolas en Argentina:
-1. Obtiene información de RENSPA desde SENASA
-2. Visualiza campos en mapas interactivos
-3. Prepara datos para Google Earth Engine
+Esta herramienta permite:
+
+1. Consultar todos los RENSPA asociados a un CUIT en la base de datos de SENASA
+2. Visualizar los polígonos de los campos en un mapa interactivo
+3. Descargar los datos en formato KMZ/GeoJSON para su uso en sistemas GIS
 """)
 
-# Menú de navegación
-st.sidebar.title("Navegación")
-opcion = st.sidebar.radio(
-    "Seleccione una función:",
-    ["Inicio", "Procesar por CUIT", "Procesar lista de RENSPA", "Convertir CSV a GeoJSON", "Datos históricos", "Mapa de ejemplo"]
-)
+# Función para normalizar CUIT
+def normalizar_cuit(cuit):
+    """Normaliza un CUIT a formato XX-XXXXXXXX-X"""
+    # Eliminar guiones si están presentes
+    cuit_limpio = cuit.replace("-", "")
+    
+    # Validar longitud
+    if len(cuit_limpio) != 11:
+        raise ValueError(f"CUIT inválido: {cuit}. Debe tener 11 dígitos.")
+    
+    # Reformatear con guiones
+    return f"{cuit_limpio[:2]}-{cuit_limpio[2:10]}-{cuit_limpio[10]}"
 
-# Contenido según la opción seleccionada
-if opcion == "Inicio":
-    st.header("Bienvenido al Sistema de Análisis Agrícola")
-    
-    # Descripción principal
-    st.markdown("""
-    Esta aplicación está diseñada para ayudar a los productores agrícolas y profesionales del sector a:
-    
-    * **Obtener datos RENSPA** directamente desde SENASA
-    * **Visualizar campos** en mapas interactivos
-    * **Analizar distribución** de cultivos y áreas
-    * **Generar archivos GeoJSON** para sistemas de información geográfica
-    * **Preparar código** para Google Earth Engine
-    """)
-    
-    # Mostrar instrucciones básicas
-    st.subheader("Instrucciones de uso")
-    
-    tab1, tab2, tab3, tab4 = st.tabs(["CUIT", "Lista RENSPA", "CSV a GeoJSON", "Datos históricos"])
-    
-    with tab1:
-        st.markdown("""
-        1. Seleccione "Procesar por CUIT" en el menú de navegación
-        2. Ingrese un número de CUIT válido
-        3. Especifique si desea procesar solo RENSPA activos
-        4. Haga clic en "Procesar" para obtener los datos
-        5. Visualice los resultados y descargue los archivos generados
-        """)
-    
-    with tab2:
-        st.markdown("""
-        1. Seleccione "Procesar lista de RENSPA" en el menú de navegación
-        2. Ingrese los números de RENSPA manualmente o cargue un archivo
-        3. Haga clic en "Procesar RENSPA" para obtener los datos
-        4. Visualice los resultados y descargue los archivos generados
-        """)
-    
-    with tab3:
-        st.markdown("""
-        1. Seleccione "Convertir CSV a GeoJSON" en el menú de navegación
-        2. Cargue un archivo CSV con datos de RENSPA y polígonos
-        3. Verifique la vista previa y la estructura de los datos
-        4. Descargue el archivo GeoJSON generado
-        5. Utilice el código proporcionado para visualizar en Google Earth Engine
-        """)
-    
-    with tab4:
-        st.markdown("""
-        1. Seleccione "Datos históricos" en el menú de navegación
-        2. Elija un campo y una campaña agrícola
-        3. Explore los datos y visualizaciones disponibles
-        4. Descargue los datos históricos para análisis adicionales
-        """)
-    
-    # Información adicional
-    st.subheader("Sobre esta aplicación")
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.markdown("""
-        Esta herramienta ha sido desarrollada para automatizar el proceso de análisis agrícola en Argentina,
-        facilitando el acceso y visualización de datos RENSPA (Registro Nacional Sanitario de Productores Agropecuarios).
+# Función para obtener RENSPA por CUIT
+def obtener_renspa_por_cuit(cuit):
+    """
+    Obtiene todos los RENSPA asociados a un CUIT, manejando la paginación
+    """
+    try:
+        # URL base para la consulta
+        url_base = f"{API_BASE_URL}/consultaPorCuit"
         
-        **Características principales:**
+        todos_renspa = []
+        offset = 0
+        limit = 10  # La API usa un límite de 10 por página
+        has_more = True
         
-        * Interfaz intuitiva y fácil de usar
-        * Visualización geoespacial interactiva
-        * Generación de archivos en formatos estándar
-        * Compatibilidad con Google Earth Engine
-        """)
+        # Realizar consultas sucesivas hasta obtener todos los RENSPA
+        while has_more:
+            # Construir URL con offset para paginación
+            url = f"{url_base}?cuit={cuit}&offset={offset}"
+            
+            try:
+                # Realizar la consulta a la API
+                response = requests.get(url, timeout=15)
+                response.raise_for_status()
+                resultado = response.json()
+                
+                # Verificar si hay resultados
+                if 'items' in resultado and resultado['items']:
+                    # Agregar los RENSPA a la lista total
+                    todos_renspa.extend(resultado['items'])
+                    
+                    # Verificar si hay más páginas
+                    has_more = resultado.get('hasMore', False)
+                    
+                    # Actualizar offset para la siguiente página
+                    offset += limit
+                else:
+                    has_more = False
+            
+            except Exception as e:
+                st.error(f"Error consultando la API: {str(e)}")
+                has_more = False
+                
+            # Pausa breve para no sobrecargar la API
+            time.sleep(TIEMPO_ESPERA)
+        
+        return todos_renspa
     
-    with col2:
-        # Mostrar imagen o logo si se tiene
-        st.info("Versión de demostración 1.0")
-        st.warning("Los datos mostrados son simulados con fines ilustrativos.")
+    except Exception as e:
+        st.error(f"Error al obtener RENSPA: {str(e)}")
+        return []
+
+# Función para normalizar RENSPA
+def normalizar_renspa(renspa):
+    """Normaliza un RENSPA al formato ##.###.#.#####/##"""
+    # Eliminar espacios
+    renspa_limpio = renspa.strip()
     
-elif opcion == "Procesar por CUIT":
-    st.header("Procesar por CUIT")
+    # Ya tiene el formato correcto con puntos y barra
+    if re.match(r'^\d{2}\.\d{3}\.\d\.\d{5}/\d{2}$', renspa_limpio):
+        return renspa_limpio
     
-    # Formulario para ingresar CUIT
-    cuit = st.text_input("Ingrese el CUIT (formato: XX-XXXXXXXX-X):", "30-65425756-2")
+    # Tiene el formato numérico sin puntos ni barra
+    # Formato esperado: XXYYYZWWWWWDD (XX.YYY.Z.WWWWW/DD)
+    if re.match(r'^\d{13}$', renspa_limpio):
+        return f"{renspa_limpio[0:2]}.{renspa_limpio[2:5]}.{renspa_limpio[5:6]}.{renspa_limpio[6:11]}/{renspa_limpio[11:13]}"
     
-    # Opciones de procesamiento
-    col1, col2 = st.columns(2)
-    with col1:
-        solo_activos = st.checkbox("Solo RENSPA activos", value=True)
-    with col2:
-        buffer_distancia = st.slider("Distancia buffer para agrupar campos (m)", 0, 100, 5)
+    raise ValueError(f"Formato de RENSPA inválido: {renspa}")
+
+# Función para consultar detalles de un RENSPA
+def consultar_renspa_detalle(renspa):
+    """
+    Consulta los detalles de un RENSPA específico para obtener el polígono
+    """
+    try:
+        url = f"{API_BASE_URL}/consultaPorNumero?numero={renspa}"
+        
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data
+    except Exception as e:
+        st.error(f"Error consultando {renspa}: {e}")
+        return None
+
+# Función para extraer coordenadas de un polígono
+def extraer_coordenadas(poligono_str):
+    """
+    Extrae coordenadas de un string de polígono en el formato de SENASA
+    """
+    if not poligono_str or not isinstance(poligono_str, str):
+        return None
     
-    if st.button("Procesar"):
+    # Extraer pares de coordenadas
+    coord_pattern = r'\(([-\d\.]+),([-\d\.]+)\)'
+    coord_pairs = re.findall(coord_pattern, poligono_str)
+    
+    if not coord_pairs:
+        return None
+    
+    # Convertir a formato [lon, lat] para GeoJSON
+    coords_geojson = []
+    for lat_str, lon_str in coord_pairs:
+        try:
+            lat = float(lat_str)
+            lon = float(lon_str)
+            coords_geojson.append([lon, lat])  # GeoJSON usa [lon, lat]
+        except ValueError:
+            continue
+    
+    # Verificar que hay al menos 3 puntos y que el polígono está cerrado
+    if len(coords_geojson) >= 3:
+        # Para polígonos válidos, asegurarse de que está cerrado
+        if coords_geojson[0] != coords_geojson[-1]:
+            coords_geojson.append(coords_geojson[0])  # Cerrar el polígono
+        
+        return coords_geojson
+    
+    return None
+
+# Formulario para ingresar CUIT
+st.header("Consulta por CUIT")
+cuit_input = st.text_input("Ingrese el CUIT (formato: XX-XXXXXXXX-X o XXXXXXXXXXX):", "30-65425756-2")
+
+# Opciones de procesamiento
+col1, col2 = st.columns(2)
+with col1:
+    solo_activos = st.checkbox("Solo RENSPA activos", value=True)
+with col2:
+    incluir_poligono = st.checkbox("Incluir información de polígonos", value=True)
+
+# Botón para procesar
+if st.button("Consultar RENSPA"):
+    try:
+        # Normalizar CUIT
+        cuit_normalizado = normalizar_cuit(cuit_input)
+        
         # Mostrar un indicador de procesamiento
-        with st.spinner('Procesando CUIT...'):
-            # Simulación de progreso
+        with st.spinner('Consultando RENSPA desde SENASA...'):
+            # Crear barras de progreso
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Simular la obtención de datos (paso 1)
-            status_text.text("Consultando API de SENASA...")
+            # Paso 1: Obtener todos los RENSPA para el CUIT
+            status_text.text("Obteniendo listado de RENSPA...")
             progress_bar.progress(20)
-            time.sleep(1)  # Simular procesamiento
             
-            # Datos simulados de RENSPA
-            renspa_simulados = [
-                {"renspa": "01.001.0.00123/01", "titular": "AGRICULTOR EJEMPLO 1", "localidad": "Tandil", "activo": True},
-                {"renspa": "01.001.0.00456/02", "titular": "AGRICULTOR EJEMPLO 2", "localidad": "Olavarría", "activo": True},
-                {"renspa": "01.001.0.00789/03", "titular": "AGRICULTOR EJEMPLO 3", "localidad": "Azul", "activo": False},
-                {"renspa": "01.001.0.01012/04", "titular": "AGRICULTOR EJEMPLO 4", "localidad": "Balcarce", "activo": True}
-            ]
+            todos_renspa = obtener_renspa_por_cuit(cuit_normalizado)
             
-            # Filtrar por activos si se solicita
+            if not todos_renspa:
+                st.error(f"No se encontraron RENSPA para el CUIT {cuit_normalizado}")
+                st.stop()
+            
+            # Crear DataFrame para mejor visualización y manipulación
+            df_renspa = pd.DataFrame(todos_renspa)
+            
+            # Contar RENSPA activos e inactivos
+            activos = df_renspa[df_renspa['fecha_baja'].isnull()].shape[0]
+            inactivos = df_renspa[~df_renspa['fecha_baja'].isnull()].shape[0]
+            
+            st.success(f"Se encontraron {len(todos_renspa)} RENSPA en total ({activos} activos, {inactivos} inactivos)")
+            
+            # Filtrar según la opción seleccionada
             if solo_activos:
-                renspa_filtrados = [r for r in renspa_simulados if r["activo"]]
-                st.success(f"Se encontraron {len(renspa_filtrados)} RENSPA activos de un total de {len(renspa_simulados)}")
+                renspa_a_procesar = df_renspa[df_renspa['fecha_baja'].isnull()].to_dict('records')
+                st.info(f"Se procesarán {len(renspa_a_procesar)} RENSPA activos")
             else:
-                renspa_filtrados = renspa_simulados
-                st.success(f"Se encontraron {len(renspa_simulados)} RENSPA en total")
+                renspa_a_procesar = todos_renspa
+                st.info(f"Se procesarán todos los {len(renspa_a_procesar)} RENSPA")
             
-            # Actualizar progreso
-            status_text.text("Procesando polígonos...")
-            progress_bar.progress(60)
-            time.sleep(1)  # Simular procesamiento
-            
-            # Mostrar los datos en una tabla
-            df = pd.DataFrame(renspa_filtrados)
-            st.subheader("RENSPA encontrados:")
-            st.dataframe(df)
-            
-            # Completar progreso
-            status_text.text("Procesamiento completo!")
-            progress_bar.progress(100)
-            
-            # Mostrar botones de descarga simulada
-            st.subheader("Descargar resultados:")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button(
-                    label="Descargar datos CSV",
-                    data=df.to_csv(index=False).encode('utf-8'),
-                    file_name=f'renspa_{cuit.replace("-", "")}.csv',
-                    mime='text/csv',
-                )
-            with col2:
-                st.download_button(
-                    label="Descargar GeoJSON (simulado)",
-                    data="{}",  # Datos simulados
-                    file_name=f'renspa_{cuit.replace("-", "")}.geojson',
-                    mime='application/json',
-                )
-            
-            # Mostrar mapa con polígonos simulados
-            if folium_disponible:
-                st.subheader("Visualización de campos:")
+            # Paso 2: Procesar los RENSPA para obtener los polígonos
+            if incluir_poligono:
+                status_text.text("Obteniendo información de polígonos...")
+                progress_bar.progress(40)
                 
-                # Crear mapa base
-                m = folium.Map(location=[-37.33, -59.13], zoom_start=8)
+                # Listas para almacenar resultados
+                poligonos_gee = []
+                fallidos = []
+                renspa_sin_poligono = []
                 
-                # Añadir polígonos simulados para cada RENSPA
-                for i, renspa in enumerate(renspa_filtrados):
-                    # Crear un polígono aleatorio alrededor de un punto central
+                # Procesar cada RENSPA
+                for i, item in enumerate(renspa_a_procesar):
+                    renspa = item['renspa']
+                    # Actualizar progreso
+                    progress_percentage = 40 + (i * 40 // len(renspa_a_procesar))
+                    progress_bar.progress(progress_percentage)
+                    status_text.text(f"Procesando RENSPA: {renspa} ({i+1}/{len(renspa_a_procesar)})")
                     
-                    # Coordenadas base según localidad
-                    if renspa["localidad"] == "Tandil":
-                        centro = [-37.33, -59.13]
-                    elif renspa["localidad"] == "Olavarría":
-                        centro = [-36.89, -60.32]
-                    elif renspa["localidad"] == "Azul":
-                        centro = [-36.77, -59.85]
-                    elif renspa["localidad"] == "Balcarce":
-                        centro = [-37.84, -58.25]
+                    # Verificar si ya tiene el polígono en la información básica
+                    if 'poligono' in item and item['poligono']:
+                        poligono_str = item['poligono']
+                        superficie = item.get('superficie', 0)
+                        
+                        # Extraer coordenadas
+                        coordenadas = extraer_coordenadas(poligono_str)
+                        
+                        if coordenadas:
+                            # Crear objeto con datos del polígono
+                            poligono_data = {
+                                'renspa': renspa,
+                                'coords': coordenadas,
+                                'superficie': superficie,
+                                'titular': item.get('titular', ''),
+                                'localidad': item.get('localidad', '')
+                            }
+                            poligonos_gee.append(poligono_data)
+                            continue
+                    
+                    # Si no tenía polígono o no era válido, consultar más detalles
+                    resultado = consultar_renspa_detalle(renspa)
+                    
+                    if resultado and 'items' in resultado and resultado['items'] and 'poligono' in resultado['items'][0]:
+                        item_detalle = resultado['items'][0]
+                        poligono_str = item_detalle.get('poligono')
+                        superficie = item_detalle.get('superficie', 0)
+                        
+                        if poligono_str:
+                            # Extraer coordenadas
+                            coordenadas = extraer_coordenadas(poligono_str)
+                            
+                            if coordenadas:
+                                # Crear objeto con datos del polígono
+                                poligono_data = {
+                                    'renspa': renspa,
+                                    'coords': coordenadas,
+                                    'superficie': superficie,
+                                    'titular': item.get('titular', ''),
+                                    'localidad': item.get('localidad', '')
+                                }
+                                poligonos_gee.append(poligono_data)
+                            else:
+                                fallidos.append(renspa)
+                        else:
+                            renspa_sin_poligono.append(renspa)
                     else:
-                        centro = [-37.33 + random.uniform(-0.5, 0.5), -59.13 + random.uniform(-0.5, 0.5)]
+                        renspa_sin_poligono.append(renspa)
                     
-                    # Crear vértices para un polígono aleatorio
-                    vertices = []
-                    for j in range(5):  # Polígono de 5 lados
-                        # Generar un punto aleatorio cerca del centro
-                        lat = centro[0] + random.uniform(-0.05, 0.05)
-                        lon = centro[1] + random.uniform(-0.05, 0.05)
-                        vertices.append([lat, lon])
-                    
-                    # Cerrar el polígono
-                    vertices.append(vertices[0])
-                    
-                    # Color según estado
-                    color = 'green' if renspa["activo"] else 'orange'
-                    
-                    # Añadir polígono al mapa
-                    folium.Polygon(
-                        locations=vertices,
-                        color=color,
-                        fill=True,
-                        fill_color=color,
-                        fill_opacity=0.3,
-                        tooltip=f"RENSPA: {renspa['renspa']}",
-                        popup=f"<b>RENSPA:</b> {renspa['renspa']}<br><b>Titular:</b> {renspa['titular']}<br><b>Localidad:</b> {renspa['localidad']}"
-                    ).add_to(m)
+                    # Pausa breve para no sobrecargar la API
+                    time.sleep(TIEMPO_ESPERA)
                 
-                # Añadir marcadores para ciudades de referencia
-                ciudades = [
-                    ["Tandil", -37.33, -59.13],
-                    ["Olavarría", -36.89, -60.32],
-                    ["Azul", -36.77, -59.85],
-                    ["Balcarce", -37.84, -58.25]
-                ]
+                # Mostrar estadísticas de procesamiento
+                total_procesados = len(renspa_a_procesar)
+                total_exitosos = len(poligonos_gee)
+                total_fallidos = len(fallidos)
+                total_sin_poligono = len(renspa_sin_poligono)
                 
-                for ciudad, lat, lon in ciudades:
-                    folium.Marker(
-                        [lat, lon],
-                        tooltip=ciudad,
-                        icon=folium.Icon(color="blue", icon="info-sign")
-                    ).add_to(m)
-                
-                # Mostrar el mapa
-                folium_static(m)
-                
-                # Código JavaScript simulado para Google Earth Engine
-                st.subheader("Código para Google Earth Engine:")
-                code = """// Código para Google Earth Engine (simulado)
-var poligonos = [];
-// Polígono para RENSPA: 01.001.0.00123/01
-var coords_01_001_0_00123_01 = [
-  [-37.33, -59.13],
-  [-37.35, -59.15],
-  [-37.32, -59.18],
-  [-37.30, -59.12],
-  [-37.33, -59.13]
-];
-var poligono_01_001_0_00123_01 = ee.Geometry.Polygon([coords_01_001_0_00123_01]);
-var feature_01_001_0_00123_01 = ee.Feature(poligono_01_001_0_00123_01, {
-  "renspa": "01.001.0.00123/01",
-  "titular": "AGRICULTOR EJEMPLO 1",
-  "localidad": "Tandil",
-  "sistema": "RENSPA-SENASA"
-});
-poligonos.push(feature_01_001_0_00123_01);
-
-// Crear feature collection con todos los polígonos
-var featureCollection = ee.FeatureCollection(poligonos);
-
-// Centrar el mapa en los polígonos
-Map.centerObject(featureCollection);
-
-// Mostrar los polígonos en el mapa
-Map.addLayer(featureCollection, {color: "red", fillColor: "red66", width: 2}, "RENSPA Polígonos");
-"""
-                st.code(code, language="javascript")
-            else:
-                st.warning("Para visualizar mapas, instala folium y streamlit-folium con: pip install folium streamlit-folium")
-        
-elif opcion == "Procesar lista de RENSPA":
-    st.header("Procesar lista de RENSPA")
-    
-    # Opciones de entrada
-    input_type = st.radio(
-        "Seleccione método de entrada:",
-        ["Ingresar manualmente", "Cargar archivo"]
-    )
-    
-    renspa_list = []
-    
-    if input_type == "Ingresar manualmente":
-        # Área de texto para ingresar múltiples RENSPA
-        renspa_input = st.text_area(
-            "Ingrese los RENSPA (uno por línea):", 
-            "01.001.0.00123/01\n01.001.0.00456/02\n01.001.0.00789/03",
-            height=150
-        )
-        
-        if renspa_input:
-            renspa_list = [line.strip() for line in renspa_input.split('\n') if line.strip()]
-    else:
-        uploaded_file = st.file_uploader("Suba un archivo TXT con un RENSPA por línea", type=['txt'])
-        
-        if uploaded_file:
-            content = uploaded_file.getvalue().decode('utf-8')
-            renspa_list = [line.strip() for line in content.split('\n') if line.strip()]
-            st.success(f"Archivo cargado con {len(renspa_list)} RENSPA")
-    
-    # Mostrar lista de RENSPA a procesar
-    if renspa_list:
-        st.write(f"RENSPA a procesar ({len(renspa_list)}):")
-        st.write(", ".join(renspa_list[:10]) + ("..." if len(renspa_list) > 10 else ""))
-    
-    # Botón para procesar
-    if st.button("Procesar RENSPA") and renspa_list:
-        # Mostrar un indicador de procesamiento
-        with st.spinner('Procesando RENSPA...'):
-            # Simulación de progreso
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+                st.subheader("Estadísticas de procesamiento")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total procesados", total_procesados)
+                with col2:
+                    st.metric("Con polígono", total_exitosos)
+                with col3:
+                    st.metric("Sin polígono", total_sin_poligono + total_fallidos)
             
-            # Simular la obtención de datos
-            status_text.text("Consultando API de SENASA...")
-            progress_bar.progress(20)
-            time.sleep(1)  # Simular procesamiento
-            
-            # Datos simulados para cada RENSPA
-            renspa_procesados = []
-            for i, renspa in enumerate(renspa_list):
-                # Datos simulados
-                datos = {
-                    "renspa": renspa,
-                    "titular": f"TITULAR EJEMPLO {i+1}",
-                    "localidad": ["Tandil", "Olavarría", "Azul", "Balcarce"][i % 4],
-                    "superficie": round(50 + i * 10, 2)
-                }
-                renspa_procesados.append(datos)
-                
-                # Actualizar progreso
-                progress_bar.progress(20 + (i+1) * 60 // len(renspa_list))
-            
-            # Mostrar los datos en una tabla
+            # Mostrar los datos en formato de tabla
             status_text.text("Generando resultados...")
-            df = pd.DataFrame(renspa_procesados)
-            st.subheader("RENSPA procesados:")
-            st.dataframe(df)
+            progress_bar.progress(80)
             
-            # Completar progreso
-            status_text.text("Procesamiento completo!")
-            progress_bar.progress(100)
+            st.subheader("Listado de RENSPA")
+            st.dataframe(df_renspa)
             
-            # Mostrar mapa con polígonos simulados para los RENSPA
-            if folium_disponible:
-                st.subheader("Visualización de campos:")
+            # Si se procesaron polígonos, mostrarlos en el mapa
+            if incluir_poligono and poligonos_gee and folium_disponible:
+                # Crear mapa para visualización
+                st.subheader("Visualización de polígonos")
+                
+                # Determinar centro del mapa
+                if poligonos_gee:
+                    # Usar el primer polígono como referencia
+                    center_lat = poligonos_gee[0]['coords'][0][1]  # Latitud está en la segunda posición
+                    center_lon = poligonos_gee[0]['coords'][0][0]  # Longitud está en la primera posición
+                else:
+                    # Centro predeterminado (Buenos Aires)
+                    center_lat = -34.603722
+                    center_lon = -58.381592
                 
                 # Crear mapa base
-                m = folium.Map(location=[-37.33, -59.13], zoom_start=8)
+                m = folium.Map(location=[center_lat, center_lon], zoom_start=10)
                 
-                # Añadir polígonos simulados para cada RENSPA
-                ciudades_coords = {
-                    "Tandil": [-37.33, -59.13],
-                    "Olavarría": [-36.89, -60.32],
-                    "Azul": [-36.77, -59.85],
-                    "Balcarce": [-37.84, -58.25]
-                }
-                
-                for renspa_data in renspa_procesados:
-                    # Coordenadas base según localidad
-                    centro = ciudades_coords.get(
-                        renspa_data["localidad"], 
-                        [-37.33 + random.uniform(-0.5, 0.5), -59.13 + random.uniform(-0.5, 0.5)]
-                    )
-                    
-                    # Crear vértices para un polígono aleatorio
-                    vertices = []
-                    for j in range(5):  # Polígono de 5 lados
-                        # Generar un punto aleatorio cerca del centro
-                        lat = centro[0] + random.uniform(-0.05, 0.05)
-                        lon = centro[1] + random.uniform(-0.05, 0.05)
-                        vertices.append([lat, lon])
-                    
-                    # Cerrar el polígono
-                    vertices.append(vertices[0])
+                # Añadir cada polígono al mapa
+                for pol in poligonos_gee:
+                    # Formatear popup con información
+                    popup_text = f"""
+                    <b>RENSPA:</b> {pol['renspa']}<br>
+                    <b>Titular:</b> {pol['titular']}<br>
+                    <b>Localidad:</b> {pol['localidad']}<br>
+                    <b>Superficie:</b> {pol['superficie']} ha
+                    """
                     
                     # Añadir polígono al mapa
                     folium.Polygon(
-                        locations=vertices,
+                        locations=[[coord[1], coord[0]] for coord in pol['coords']],  # Invertir coordenadas para folium
                         color='green',
                         fill=True,
                         fill_color='green',
                         fill_opacity=0.3,
-                        tooltip=f"RENSPA: {renspa_data['renspa']}",
-                        popup=f"<b>RENSPA:</b> {renspa_data['renspa']}<br><b>Titular:</b> {renspa_data['titular']}<br><b>Localidad:</b> {renspa_data['localidad']}<br><b>Superficie:</b> {renspa_data['superficie']} ha"
-                    ).add_to(m)
-                
-                # Añadir marcadores para ciudades de referencia
-                for ciudad, coords in ciudades_coords.items():
-                    folium.Marker(
-                        coords,
-                        tooltip=ciudad,
-                        icon=folium.Icon(color="blue", icon="info-sign")
+                        tooltip=f"RENSPA: {pol['renspa']}",
+                        popup=popup_text
                     ).add_to(m)
                 
                 # Mostrar el mapa
                 folium_static(m)
-            else:
-                st.warning("Para visualizar mapas, instala folium y streamlit-folium")
+            elif incluir_poligono and not folium_disponible:
+                st.warning("Para visualizar mapas, instala folium y streamlit-folium con: pip install folium streamlit-folium")
             
-            # Opciones de descarga
-            st.subheader("Descargar resultados:")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button(
-                    label="Descargar datos CSV",
-                    data=df.to_csv(index=False).encode('utf-8'),
-                    file_name='renspa_procesados.csv',
-                    mime='text/csv',
-                )
-            with col2:
-                st.download_button(
-                    label="Descargar GeoJSON (simulado)",
-                    data="{}",  # Datos simulados
-                    file_name='renspa_procesados.geojson',
-                    mime='application/json',
-                )
-    
-elif opcion == "Convertir CSV a GeoJSON":
-    st.header("Convertir CSV a GeoJSON")
-    
-    st.write("Esta herramienta convierte archivos CSV con datos de RENSPA a formato GeoJSON para uso en sistemas GIS.")
-    
-    # Mostrar ejemplo del formato esperado
-    with st.expander("Ver formato esperado del CSV"):
-        st.markdown("""
-        El archivo CSV debe contener al menos estas columnas:
-        - `renspa`: Número de RENSPA (ejemplo: 01.001.0.00123/01)
-        - `poligono`: String con el formato de polígono de SENASA (ejemplo: "(lat1,lon1)(lat2,lon2)...")
-        
-        Columnas opcionales pero recomendadas:
-        - `titular`: Nombre del titular
-        - `localidad`: Localidad del establecimiento
-        - `superficie`: Superficie en hectáreas
-        
-        **Ejemplo de CSV:**
-        """)
-        
-        ejemplo_csv = """renspa,titular,localidad,poligono,superficie
-01.001.0.00123/01,AGRICULTOR EJEMPLO 1,Tandil,"(-37.33,-59.13)(-37.35,-59.15)(-37.32,-59.18)(-37.30,-59.12)",120.5
-01.001.0.00456/02,AGRICULTOR EJEMPLO 2,Olavarría,"(-36.89,-60.32)(-36.91,-60.34)(-36.87,-60.36)(-36.85,-60.30)",85.3"""
-        
-        st.code(ejemplo_csv)
-    
-    # Subir archivo CSV
-    uploaded_file = st.file_uploader("Suba un archivo CSV con datos de RENSPA", type=['csv'])
-    
-    if uploaded_file:
-        # Mostrar un indicador de procesamiento
-        with st.spinner('Procesando archivo CSV...'):
-            try:
-                # Leer el CSV
-                df = pd.read_csv(uploaded_file)
-                st.success(f"Archivo cargado correctamente: {uploaded_file.name}")
+            # Generar archivo KMZ para descarga
+            if incluir_poligono and poligonos_gee:
+                status_text.text("Preparando archivos para descarga...")
+                progress_bar.progress(90)
                 
-                # Verificar columnas requeridas
-                columnas_requeridas = ['renspa', 'poligono']
-                columnas_faltantes = [col for col in columnas_requeridas if col not in df.columns]
+                # Crear archivo KML
+                kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+  <name>RENSPA - CUIT {cuit_normalizado}</name>
+  <description>Polígonos de RENSPA para el CUIT {cuit_normalizado}</description>
+  <Style id="greenPoly">
+    <LineStyle>
+      <color>ff009900</color>
+      <width>3</width>
+    </LineStyle>
+    <PolyStyle>
+      <color>7f00ff00</color>
+    </PolyStyle>
+  </Style>
+"""
                 
-                if columnas_faltantes:
-                    st.error(f"El archivo no contiene las columnas requeridas: {', '.join(columnas_faltantes)}")
-                    st.stop()
+                # Añadir cada polígono al KML
+                for pol in poligonos_gee:
+                    kml_content += f"""
+  <Placemark>
+    <name>{pol['renspa']}</name>
+    <description><![CDATA[
+      <b>RENSPA:</b> {pol['renspa']}<br/>
+      <b>Titular:</b> {pol['titular']}<br/>
+      <b>Localidad:</b> {pol['localidad']}<br/>
+      <b>Superficie:</b> {pol['superficie']} ha
+    ]]></description>
+    <styleUrl>#greenPoly</styleUrl>
+    <Polygon>
+      <extrude>1</extrude>
+      <altitudeMode>clampToGround</altitudeMode>
+      <outerBoundaryIs>
+        <LinearRing>
+          <coordinates>
+"""
+                    
+                    # Añadir coordenadas
+                    for coord in pol['coords']:
+                        lon = coord[0]
+                        lat = coord[1]
+                        kml_content += f"{lon},{lat},0\n"
+                    
+                    kml_content += """
+          </coordinates>
+        </LinearRing>
+      </outerBoundaryIs>
+    </Polygon>
+  </Placemark>
+"""
                 
-                # Mostrar un resumen de los datos
-                st.subheader("Resumen de datos")
-                st.write(f"Total de registros: {len(df)}")
-                st.write(f"Columnas disponibles: {', '.join(df.columns)}")
+                # Cerrar documento KML
+                kml_content += """
+</Document>
+</kml>
+"""
                 
-                # Mostrar una muestra de los datos
-                st.subheader("Muestra de datos")
-                st.dataframe(df.head())
+                # Crear archivo KMZ (ZIP que contiene el KML)
+                kmz_buffer = BytesIO()
+                with zipfile.ZipFile(kmz_buffer, 'w', zipfile.ZIP_DEFLATED) as kmz:
+                    kmz.writestr("doc.kml", kml_content)
                 
-                # Simular la conversión a GeoJSON
-                st.subheader("Proceso de conversión")
+                kmz_buffer.seek(0)
                 
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                status_text.text("Extrayendo coordenadas...")
-                progress_bar.progress(30)
-                time.sleep(1)  # Simular procesamiento
-                
-                status_text.text("Generando geometrías GeoJSON...")
-                progress_bar.progress(60)
-                time.sleep(1)  # Simular procesamiento
-                
-                status_text.text("Finalizando el proceso...")
-                progress_bar.progress(100)
-                
-                # Generar GeoJSON simulado
+                # Crear también un GeoJSON
                 geojson_data = {
                     "type": "FeatureCollection",
                     "features": []
                 }
                 
-                for i, row in df.head().iterrows():
+                for pol in poligonos_gee:
                     feature = {
                         "type": "Feature",
                         "properties": {
-                            "renspa": row['renspa']
+                            "renspa": pol['renspa'],
+                            "titular": pol['titular'],
+                            "localidad": pol['localidad'],
+                            "superficie": pol['superficie']
                         },
                         "geometry": {
                             "type": "Polygon",
-                            "coordinates": [[[-59.13, -37.33], [-59.15, -37.35], [-59.18, -37.32], [-59.12, -37.30], [-59.13, -37.33]]]
+                            "coordinates": [pol['coords']]
                         }
                     }
-                    
-                    # Añadir propiedades adicionales si existen
-                    for col in ['titular', 'localidad', 'superficie']:
-                        if col in df.columns:
-                            feature["properties"][col] = str(row[col])
-                    
                     geojson_data["features"].append(feature)
                 
-                # Convertir a string
                 geojson_str = json.dumps(geojson_data, indent=2)
                 
-                # Mostrar GeoJSON de muestra
-                st.subheader("Vista previa del GeoJSON generado")
-                st.code(geojson_str[:500] + "...", language="json")
+                # Preparar CSV con todos los datos
+                csv_data = df_renspa.to_csv(index=False).encode('utf-8')
                 
                 # Opciones de descarga
                 st.subheader("Descargar resultados")
                 
-                st.download_button(
-                    label="Descargar GeoJSON",
-                    data=geojson_str,
-                    file_name=f"{uploaded_file.name.split('.')[0]}.geojson",
-                    mime="application/json",
-                )
+                col1, col2, col3 = st.columns(3)
                 
-                # Añadir código para Google Earth Engine
-                st.subheader("Código para Google Earth Engine")
-                gee_code = f"""// Código para usar el GeoJSON en Google Earth Engine
-// Primero, sube el archivo GeoJSON como un Asset en Earth Engine
-
-// Luego usa este código para visualizarlo
-var renspa = ee.FeatureCollection("users/TU_USUARIO/{uploaded_file.name.split('.')[0]}");
-
-// Visualizar en el mapa
-Map.centerObject(renspa);
-Map.addLayer(renspa, {{color: 'green'}}, "RENSPA - {uploaded_file.name.split('.')[0]}");
-
-// Calcular área total
-var areaTotal = renspa.geometry().area().divide(10000); // Convertir a hectáreas
-print("Área total en hectáreas:", areaTotal);
-"""
-                st.code(gee_code, language="javascript")
+                with col1:
+                    st.download_button(
+                        label="Descargar KMZ",
+                        data=kmz_buffer,
+                        file_name=f"renspa_{cuit_normalizado.replace('-', '')}.kmz",
+                        mime="application/vnd.google-earth.kmz",
+                    )
                 
-            except Exception as e:
-                st.error(f"Error al procesar el archivo: {str(e)}")
-
-elif opcion == "Datos históricos":
-    st.header("Datos Históricos de Campos Agrícolas")
+                with col2:
+                    st.download_button(
+                        label="Descargar GeoJSON",
+                        data=geojson_str,
+                        file_name=f"renspa_{cuit_normalizado.replace('-', '')}.geojson",
+                        mime="application/json",
+                    )
+                
+                with col3:
+                    st.download_button(
+                        label="Descargar CSV",
+                        data=csv_data,
+                        file_name=f"renspa_{cuit_normalizado.replace('-', '')}.csv",
+                        mime="text/csv",
+                    )
+            
+            # Completar procesamiento
+            status_text.text("Procesamiento completo!")
+            progress_bar.progress(100)
     
-    # Selector de campo
-    campo_seleccionado = st.selectbox(
-        "Seleccione un campo:",
-        ["Campo 1 - Tandil", "Campo 2 - Olavarría", "Campo 3 - Azul"]
-    )
-    
-    # Selector de año
-    año_seleccionado = st.select_slider(
-        "Seleccione campaña agrícola:",
-        options=["2018/19", "2019/20", "2020/21", "2021/22", "2022/23", "2023/24"]
-    )
-    
-    # Mostrar información del campo
-    st.subheader(f"Información de {campo_seleccionado} - Campaña {año_seleccionado}")
-    
-    # Datos simulados según el campo y año seleccionados
-    if campo_seleccionado == "Campo 1 - Tandil":
-        area_total = 150
-        datos_cultivos = {
-            "2018/19": {"Soja": 70, "Maíz": 50, "Trigo": 20, "Sin cultivo": 10},
-            "2019/20": {"Soja": 80, "Maíz": 40, "Trigo": 20, "Sin cultivo": 10},
-            "2020/21": {"Soja": 60, "Maíz": 60, "Trigo": 20, "Sin cultivo": 10},
-            "2021/22": {"Soja": 50, "Maíz": 70, "Trigo": 20, "Sin cultivo": 10},
-            "2022/23": {"Soja": 65, "Maíz": 55, "Trigo": 20, "Sin cultivo": 10},
-            "2023/24": {"Soja": 60, "Maíz": 60, "Trigo": 20, "Sin cultivo": 10},
-        }
-        ubicacion = [-37.33, -59.13]  # Tandil
-    elif campo_seleccionado == "Campo 2 - Olavarría":
-        area_total = 200
-        datos_cultivos = {
-            "2018/19": {"Soja": 100, "Maíz": 60, "Trigo": 30, "Sin cultivo": 10},
-            "2019/20": {"Soja": 90, "Maíz": 70, "Trigo": 30, "Sin cultivo": 10},
-            "2020/21": {"Soja": 80, "Maíz": 80, "Trigo": 30, "Sin cultivo": 10},
-            "2021/22": {"Soja": 70, "Maíz": 90, "Trigo": 30, "Sin cultivo": 10},
-            "2022/23": {"Soja": 85, "Maíz": 75, "Trigo": 30, "Sin cultivo": 10},
-            "2023/24": {"Soja": 80, "Maíz": 80, "Trigo": 30, "Sin cultivo": 10},
-        }
-        ubicacion = [-36.89, -60.32]  # Olavarría
-    else:  # Campo 3 - Azul
-        area_total = 180
-        datos_cultivos = {
-            "2018/19": {"Soja": 80, "Maíz": 60, "Trigo": 25, "Sin cultivo": 15},
-            "2019/20": {"Soja": 70, "Maíz": 70, "Trigo": 25, "Sin cultivo": 15},
-            "2020/21": {"Soja": 60, "Maíz": 80, "Trigo": 25, "Sin cultivo": 15},
-            "2021/22": {"Soja": 75, "Maíz": 65, "Trigo": 25, "Sin cultivo": 15},
-            "2022/23": {"Soja": 70, "Maíz": 70, "Trigo": 25, "Sin cultivo": 15},
-            "2023/24": {"Soja": 65, "Maíz": 75, "Trigo": 25, "Sin cultivo": 15},
-        }
-        ubicacion = [-36.77, -59.85]  # Azul
-    
-    # Datos para el año seleccionado
-    datos_año = datos_cultivos[año_seleccionado]
-    
-    # Mostrar métricas
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Área Total", f"{area_total} ha")
-    with col2:
-        st.metric("Soja", f"{datos_año['Soja']} ha")
-    with col3:
-        st.metric("Maíz", f"{datos_año['Maíz']} ha")
-    with col4:
-        st.metric("Trigo", f"{datos_año['Trigo']} ha")
-    
-    # Mostrar gráfico de distribución de cultivos
-    st.subheader("Distribución de cultivos")
-    
-    if matplotlib_disponible:
-        # Gráfico de torta
-        fig, ax = plt.subplots(figsize=(8, 6))
-        cultivos = list(datos_año.keys())
-        valores = list(datos_año.values())
-        colores = ['#4CAF50', '#FFC107', '#2196F3', '#9E9E9E']
-        
-        ax.pie(valores, labels=cultivos, autopct='%1.1f%%', startangle=90, colors=colores)
-        ax.axis('equal')  # Aspecto igual para asegurar que el gráfico sea circular
-        
-        st.pyplot(fig)
-    else:
-        st.warning("Para visualizar gráficos, instala matplotlib: pip install matplotlib")
-    
-    # Mostrar mapa del campo si folium está disponible
-    st.subheader("Ubicación del campo")
-    
-    if folium_disponible:
-        # Crear mapa
-        m = folium.Map(location=ubicacion, zoom_start=12)
-        
-        # Generar polígono simulado para el campo
-        vertices = []
-        for i in range(6):  # Polígono de 6 lados
-            lat = ubicacion[0] + random.uniform(-0.07, 0.07)
-            lon = ubicacion[1] + random.uniform(-0.07, 0.07)
-            vertices.append([lat, lon])
-        
-        vertices.append(vertices[0])  # Cerrar el polígono
-        
-        # Añadir polígono al mapa
-        folium.Polygon(
-            locations=vertices,
-            color='green',
-            fill=True,
-            fill_color='green',
-            fill_opacity=0.3,
-            tooltip=campo_seleccionado,
-            popup=f"<b>Campo:</b> {campo_seleccionado}<br><b>Área:</b> {area_total} ha"
-        ).add_to(m)
-        
-        # Añadir marcador para la ciudad
-        ciudad = campo_seleccionado.split(" - ")[1]
-        folium.Marker(
-            ubicacion,
-            tooltip=ciudad,
-            icon=folium.Icon(color="blue", icon="info-sign")
-        ).add_to(m)
-        
-        # Mostrar el mapa
-        folium_static(m)
-    else:
-        st.warning("Para visualizar mapas, instala folium y streamlit-folium")
-    
-    # Datos históricos en tabla
-    st.subheader("Datos históricos por campaña")
-    
-    # Crear DataFrame para todas las campañas
-    datos_historicos = []
-    for año, datos in datos_cultivos.items():
-        fila = {"Campaña": año}
-        fila.update(datos)
-        datos_historicos.append(fila)
-    
-    df_historico = pd.DataFrame(datos_historicos)
-    st.dataframe(df_historico, use_container_width=True)
-    
-    # Opción para descargar
-    st.download_button(
-        label="Descargar datos históricos",
-        data=df_historico.to_csv(index=False).encode('utf-8'),
-        file_name=f"historico_{campo_seleccionado.replace(' - ', '_').replace(' ', '_')}.csv",
-        mime='text/csv',
-    )
-
-elif opcion == "Mapa de ejemplo":
-    st.header("Mapa de Ejemplo")
-    
-    if folium_disponible:
-        # Crear un mapa centrado en Argentina
-        m = folium.Map(location=[-34.603722, -58.381592], zoom_start=5)
-        
-        # Añadir algunos marcadores de ejemplo
-        folium.Marker(
-            [-34.603722, -58.381592], 
-            popup="Buenos Aires",
-            tooltip="Capital Federal"
-        ).add_to(m)
-        
-        folium.Marker(
-            [-32.8894587, -68.8458386], 
-            popup="Mendoza",
-            tooltip="Mendoza"
-        ).add_to(m)
-        
-        # Añadir un polígono de ejemplo
-        folium.Polygon(
-            locations=[
-                [-37.33, -59.13],  # Tandil
-                [-36.89, -60.32],  # Olavarría
-                [-36.77, -59.85],  # Azul
-            ],
-            color='green',
-            fill=True,
-            fill_color='green',
-            fill_opacity=0.2,
-            popup="Región de ejemplo"
-        ).add_to(m)
-        
-        # Mostrar el mapa en la aplicación
-        folium_static(m)
-    else:
-        st.warning("Para visualizar mapas, instala folium y streamlit-folium con: pip install folium streamlit-folium")
+    except Exception as e:
+        st.error(f"Error durante el procesamiento: {str(e)}")
 
 # Información en el pie de página
 st.sidebar.markdown("---")
