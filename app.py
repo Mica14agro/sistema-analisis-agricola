@@ -1,4 +1,6 @@
 import streamlit as st
+import folium
+from streamlit_folium import folium_static
 
 # Configuración de la página
 st.set_page_config(
@@ -22,7 +24,7 @@ Este sistema automatiza el análisis de datos agrícolas en Argentina:
 st.sidebar.title("Navegación")
 opcion = st.sidebar.radio(
     "Seleccione una función:",
-    ["Inicio", "Procesar por CUIT", "Procesar lista de RENSPA", "Convertir CSV a GeoJSON"]
+    ["Inicio", "Procesar por CUIT", "Procesar lista de RENSPA", "Convertir CSV a GeoJSON", "Mapa de ejemplo"]
 )
 
 # Contenido según la opción seleccionada
@@ -64,6 +66,42 @@ elif opcion == "Convertir CSV a GeoJSON":
     if uploaded_file is not None:
         st.success(f"Archivo cargado: {uploaded_file.name}")
         st.info("Versión de demostración - La funcionalidad completa estará disponible próximamente")
+
+elif opcion == "Mapa de ejemplo":
+    st.header("Mapa de Ejemplo")
+    
+    # Crear un mapa centrado en Argentina
+    m = folium.Map(location=[-34.603722, -58.381592], zoom_start=5)
+    
+    # Añadir algunos marcadores de ejemplo
+    folium.Marker(
+        [-34.603722, -58.381592], 
+        popup="Buenos Aires",
+        tooltip="Capital Federal"
+    ).add_to(m)
+    
+    folium.Marker(
+        [-32.8894587, -68.8458386], 
+        popup="Mendoza",
+        tooltip="Mendoza"
+    ).add_to(m)
+    
+    # Añadir un polígono de ejemplo
+    folium.Polygon(
+        locations=[
+            [-37.33, -59.13],  # Tandil
+            [-36.89, -60.32],  # Olavarría
+            [-36.77, -59.85],  # Azul
+        ],
+        color='green',
+        fill=True,
+        fill_color='green',
+        fill_opacity=0.2,
+        popup="Región de ejemplo"
+    ).add_to(m)
+    
+    # Mostrar el mapa en la aplicación
+    folium_static(m)
 
 # Información en el pie de página
 st.sidebar.markdown("---")
