@@ -17,15 +17,6 @@ try:
     folium_disponible = True
 except ImportError:
     folium_disponible = False
-
-# Intentar importar Earth Engine
-try:
-    import ee
-    import geemap.foliumap as geemap
-    ee_disponible = True
-except ImportError:
-    ee_disponible = False
-
 # Configuración de la página
 st.set_page_config(
     page_title="Consulta RENSPA - SENASA",
@@ -48,124 +39,6 @@ Esta herramienta permite:
 2. Visualizar los polígonos de los campos en un mapa interactivo
 3. Descargar los datos en formato KMZ/GeoJSON para su uso en sistemas GIS
 """)
-
-# Si Earth Engine está disponible, añadir esa funcionalidad a la introducción
-if ee_disponible:
-    st.markdown("4. Analizar los cultivos históricos de los campos (usando Google Earth Engine)")
-
-
-# FUNCIONES DE GOOGLE EARTH ENGINE
-# --------------------------------
-
-def inicializar_earth_engine():
-    """Inicializa la API de Earth Engine si no está ya inicializada"""
-    try:
-        ee.Initialize()
-        return True
-    except Exception as e:
-        st.warning("Google Earth Engine no está inicializado. Algunas funcionalidades estarán limitadas.")
-        return False
-
-def crear_boton_analisis_cultivos(poligonos):
-    """
-    Crea un botón para analizar cultivos históricos usando Google Earth Engine
-    
-    Args:
-        poligonos: Lista de diccionarios con información de polígonos
-    """
-    if st.button("Analizar Cultivos Históricos"):
-        with st.spinner("Analizando cultivos con Google Earth Engine..."):
-            # Inicializar Earth Engine
-            if not inicializar_earth_engine():
-                st.error("No se pudo inicializar Google Earth Engine")
-                return
-            
-            try:
-                # Crear un mapa de Earth Engine basado en folium (compatible con streamlit-folium)
-                m = geemap.Map()
-                
-                # Añadir control de capas
-                m.add_layer_control()
-                
-                # Procesar cada polígono
-                for i, pol in enumerate(poligonos):
-                    if 'coords' in pol:
-                        # Convertir coordenadas de [lon, lat] a [lat, lon] para EE
-                        ee_coords = [[coord[1], coord[0]] for coord in pol['coords']]
-                        
-                        # Crear polígono para Earth Engine
-                        polygon = ee.Geometry.Polygon([ee_coords])
-                        
-                        # Añadir polígono al mapa como capa vectorial
-                        m.add_layer(ee.Feature(polygon), {'color': 'red'}, f"Polígono {i+1}")
-                
-                # Añadir capa de cobertura de cultivos mundial
-                dataset = ee.ImageCollection("MODIS/006/MCD12Q1")
-                landcover = dataset.filter(ee.Filter.date('2019-01-01', '2023-12-31'))
-                
-                # Crear una visualización para los tipos de cultivos
-                landcover_vis = {
-                    'bands': ['LC_Type1'],
-                    'min': 1,
-                    'max': 17,
-                    'palette': [
-                        '05450a', '086a10', '54a708', '78d203', '009900',
-                        'c6b044', 'dcd159', 'dade48', 'fbff13', 'b6ff05',
-                        '27ff87', 'c24f44', 'a5a5a5', 'ff6d4c', '69fff8',
-                        'f9ffa4', '1c0dff'
-                    ]
-                }
-                
-                # Añadir capa de cobertura terrestre
-                m.add_ee_layer(landcover.first(), landcover_vis, 'Cobertura Terrestre (2019)')
-                
-                # Mostrar el mapa
-                st.subheader("Análisis de Cobertura Terrestre")
-                m.to_streamlit(height=600)
-                
-                # Explicación de los colores
-                st.info("""
-                **Leyenda:**
-                - Verde oscuro: Bosques
-                - Verde claro: Arbustos y pastizales
-                - Amarillo/Naranja: Cultivos y tierras agrícolas
-                - Rojo: Urbano
-                - Gris: Terreno estéril o escasamente vegetado
-                - Azul: Agua
-                """)
-                
-                # Añadir nota sobre la precisión
-                st.warning("Nota: Este análisis se basa en datos satelitales de resolución moderada. Para análisis más detallados, considere consultar con un especialista en teledetección.")
-                
-            except Exception as e:
-                st.error(f"Error al crear el análisis de cultivos: {str(e)}")
-                st.info("Earth Engine puede no estar disponible en esta implementación de Streamlit Cloud.")
-
-def mostrar_info_earth_engine_sidebar():
-    """Muestra información sobre Earth Engine en la barra lateral"""
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Google Earth Engine")
-    
-    # Verificar si Earth Engine está disponible
-    try:
-        ee.Initialize()
-        estado = "disponible"
-    except:
-        estado = "no inicializado"
-    
-    st.sidebar.info(f"""
-    Google Earth Engine está {estado}.
-    
-    Esta herramienta permite analizar los cultivos históricos (2019-2023) 
-    en los campos utilizando datos satelitales de alta resolución.
-    
-    Para utilizar esta función, seleccione los polígonos de interés y
-    luego haga clic en "Analizar Cultivos Históricos".
-    """)
-
-
-# FUNCIONES DE LA APLICACIÓN PRINCIPAL
-# ------------------------------------
 
 # Función para normalizar CUIT
 def normalizar_cuit(cuit):
@@ -332,7 +205,7 @@ def crear_mapa_mejorado(poligonos, center=None, cuit_colors=None):
     # Crear mapa base
     m = folium.Map(location=[center_lat, center_lon], zoom_start=10)
     
-    # Añadir diferentes capas base con atribución para evitar errores
+    # Añadir diferentes capas base
     folium.TileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', 
                     name='Google Hybrid', 
                     attr='Google').add_to(m)
@@ -410,38 +283,6 @@ def mostrar_estadisticas(df_renspa, poligonos=None):
         # Contar RENSPA activos e inactivos
         activos = df_renspa[df_renspa['fecha_baja'].isnull()].shape[0]
         inactivos = df_renspa[~df_renspa['fecha_baja'].isnull()].shape[0]
-        st.metric("Total RENSPA", df_renspa.shape[0])
-    
-    with col2:
-        st.metric("RENSPA activos", activos)
-    
-    with col3:
-        st.metric("RENSPA inactivos", inactivos)
-    
-    # Si hay polígonos, mostrar estadísticas adicionales
-    if poligonos:
-        st.subheader("Estadísticas de Polígonos")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Polígonos encontrados", len(poligonos))
-        
-        with col2:
-            # Calcular área total de los polígonos
-            area_total = sum(pol.get('superficie', 0) for pol in poligonos)
-            st.metric("Área total", f"{area_total:.2f} ha")
-        
-        with col3:
-            # Promedio de área por polígono
-            if poligonos:
-                area_promedio = area_total / len(poligonos)
-                st.metric("Área promedio", f"{area_promedio:.2f} ha")
-
-
-# INTERFAZ PRINCIPAL
-# -----------------
-
 # Crear tabs para las diferentes funcionalidades
 tab1, tab2, tab3 = st.tabs(["Consulta por CUIT", "Consulta por Lista de RENSPA", "Consulta por Múltiples CUITs"])
 
@@ -604,21 +445,6 @@ with tab1:
                     
                     # Mostrar el mapa
                     folium_static(m, width=1000, height=600)
-                    
-                    # Si Earth Engine está disponible, mostrar botón para análisis de cultivos
-                    if ee_disponible:
-                        # Agregar botón para análisis de cultivos con Google Earth Engine
-                        st.subheader("Análisis de Cultivos Históricos")
-                        
-                        # Mostrar información sobre el servicio
-                        st.info("""
-                        Puede analizar los cultivos históricos (2019-2024) utilizando los datos de Google Earth Engine.
-                        Este análisis mostrará cómo ha cambiado el uso de la tierra en estos campos año a año.
-                        """)
-                        
-                        # Crear botón de análisis
-                        crear_boton_analisis_cultivos(poligonos_gee)
-                    
                 elif incluir_poligono and not folium_disponible:
                     st.warning("Para visualizar mapas, instala folium y streamlit-folium con: pip install folium streamlit-folium")
                 
@@ -755,9 +581,6 @@ with tab1:
         except Exception as e:
             st.error(f"Error durante el procesamiento: {str(e)}")
 
-# Aquí inserta el código de las pestañas 2 y 3 que son similares al de la pestaña 1
-
-# Tab2: Consulta por Lista de RENSPA
 with tab2:
     st.header("Consulta por Lista de RENSPA")
     st.write("Ingrese los RENSPA que desea consultar directamente (sin necesidad de un CUIT).")
@@ -802,11 +625,235 @@ with tab2:
     # Botón para procesar
     if st.button("Procesar Lista de RENSPA", key="btn_renspa_list") and renspa_list:
         with st.spinner('Procesando lista de RENSPA...'):
-            # Aquí va el código de procesamiento de la lista de RENSPA
-            # (Omitido por brevedad pero debe incluirse en el archivo final)
-            pass
+            # Crear barras de progreso
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Procesamiento para cada RENSPA
+            poligonos_gee = []
+            fallidos = []
+            detalles_renspa = []
+            
+            for i, renspa in enumerate(renspa_list):
+                # Actualizar progreso
+                progress_percentage = (i * 70) // len(renspa_list)
+                progress_bar.progress(progress_percentage)
+                status_text.text(f"Procesando RENSPA: {renspa} ({i+1}/{len(renspa_list)})")
+                
+                try:
+                    # Normalizar RENSPA
+                    renspa_normalizado = normalizar_renspa(renspa)
+                    
+                    # Consultar detalles
+                    resultado = consultar_renspa_detalle(renspa_normalizado)
+                    
+                    if resultado and 'items' in resultado and resultado['items']:
+                        item = resultado['items'][0]
+                        
+                        # Extraer datos básicos
+                        datos_renspa = {
+                            'renspa': renspa_normalizado,
+                            'titular': item.get('titular', ''),
+                            'localidad': item.get('localidad', ''),
+                            'superficie': item.get('superficie', 0),
+                            'fecha_baja': item.get('fecha_baja', None)
+                        }
+                        
+                        # Añadir a la lista de detalles
+                        detalles_renspa.append(datos_renspa)
+                        
+                        # Extraer polígono si está disponible
+                        if 'poligono' in item and item['poligono']:
+                            poligono_str = item['poligono']
+                            coordenadas = extraer_coordenadas(poligono_str)
+                            
+                            if coordenadas:
+                                # Añadir coordenadas al diccionario
+                                datos_renspa['coords'] = coordenadas
+                                poligonos_gee.append(datos_renspa)
+                                continue
+                        
+                        # Si llegamos aquí, no se pudo extraer el polígono
+                        fallidos.append(renspa_normalizado)
+                    else:
+                        fallidos.append(renspa)
+                
+                except Exception as e:
+                    st.error(f"Error procesando {renspa}: {str(e)}")
+                    fallidos.append(renspa)
+                
+                # Pausa breve
+                time.sleep(TIEMPO_ESPERA)
+            
+            # Crear DataFrame con todos los detalles
+            df_renspa = pd.DataFrame(detalles_renspa)
+            
+            # Actualizar progreso
+            status_text.text("Generando visualizaciones...")
+            progress_bar.progress(80)
+            
+            # Mostrar estadísticas
+            st.subheader("Resultados del procesamiento")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("RENSPA procesados", len(renspa_list))
+            with col2:
+                st.metric("RENSPA obtenidos", len(detalles_renspa))
+            with col3:
+                st.metric("RENSPA con polígono", len(poligonos_gee))
+            
+            # Mostrar datos en tabla
+            st.subheader("Detalles de RENSPA")
+            if not df_renspa.empty:
+                st.dataframe(df_renspa)
+            else:
+                st.warning("No se pudo obtener información para ninguno de los RENSPA proporcionados.")
+            
+            # Panel de estadísticas
+            if not df_renspa.empty:
+                mostrar_estadisticas(df_renspa, poligonos_gee)
+            
+            # Visualizar en mapa
+            if poligonos_gee and folium_disponible:
+                st.subheader("Visualización de polígonos")
+                
+                # Crear mapa mejorado
+                m = crear_mapa_mejorado(poligonos_gee)
+                
+                # Mostrar el mapa
+                folium_static(m, width=1000, height=600)
+                
+                # Preparar archivos para descarga
+                status_text.text("Preparando archivos para descarga...")
+                progress_bar.progress(90)
+                
+                # Crear archivo KML
+                kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+  <name>RENSPA - Lista personalizada</name>
+  <description>Polígonos de RENSPA de la lista personalizada</description>
+  <Style id="greenPoly">
+    <LineStyle>
+      <color>ff009900</color>
+      <width>3</width>
+    </LineStyle>
+    <PolyStyle>
+      <color>7f00ff00</color>
+    </PolyStyle>
+  </Style>
+"""
+                
+                # Añadir cada polígono al KML
+                for pol in poligonos_gee:
+                    kml_content += f"""
+  <Placemark>
+    <name>{pol['renspa']}</name>
+    <description><![CDATA[
+      <b>RENSPA:</b> {pol['renspa']}<br/>
+      <b>Titular:</b> {pol['titular']}<br/>
+      <b>Localidad:</b> {pol['localidad']}<br/>
+      <b>Superficie:</b> {pol['superficie']} ha
+    ]]></description>
+    <styleUrl>#greenPoly</styleUrl>
+    <Polygon>
+      <extrude>1</extrude>
+      <altitudeMode>clampToGround</altitudeMode>
+      <outerBoundaryIs>
+        <LinearRing>
+          <coordinates>
+"""
+                    
+                    # Añadir coordenadas
+                    for coord in pol['coords']:
+                        lon = coord[0]
+                        lat = coord[1]
+                        kml_content += f"{lon},{lat},0\n"
+                    
+                    kml_content += """
+          </coordinates>
+        </LinearRing>
+      </outerBoundaryIs>
+    </Polygon>
+  </Placemark>
+"""
+                
+                # Cerrar documento KML
+                kml_content += """
+</Document>
+</kml>
+"""
+                
+                # Crear archivo KMZ (ZIP que contiene el KML)
+                kmz_buffer = BytesIO()
+                with zipfile.ZipFile(kmz_buffer, 'w', zipfile.ZIP_DEFLATED) as kmz:
+                    kmz.writestr("doc.kml", kml_content)
+                
+                kmz_buffer.seek(0)
+                
+                # Crear también un GeoJSON
+                geojson_data = {
+                    "type": "FeatureCollection",
+                    "features": []
+                }
+                
+                for pol in poligonos_gee:
+                    feature = {
+                        "type": "Feature",
+                        "properties": {
+                            "renspa": pol['renspa'],
+                            "titular": pol['titular'],
+                            "localidad": pol['localidad'],
+                            "superficie": pol['superficie']
+                        },
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [pol['coords']]
+                        }
+                    }
+                    geojson_data["features"].append(feature)
+                
+                geojson_str = json.dumps(geojson_data, indent=2)
+                
+                # Preparar CSV con todos los datos
+                if not df_renspa.empty:
+                    csv_data = df_renspa.to_csv(index=False).encode('utf-8')
+                else:
+                    csv_data = "No hay datos disponibles".encode('utf-8')
+                
+                # Opciones de descarga
+                st.subheader("Descargar resultados")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.download_button(
+                        label="Descargar KMZ",
+                        data=kmz_buffer,
+                        file_name="renspa_lista.kmz",
+                        mime="application/vnd.google-earth.kmz",
+                    )
+                
+                with col2:
+                    st.download_button(
+                        label="Descargar GeoJSON",
+                        data=geojson_str,
+                        file_name="renspa_lista.geojson",
+                        mime="application/json",
+                    )
+                
+                with col3:
+                    st.download_button(
+                        label="Descargar CSV",
+                        data=csv_data,
+                        file_name="renspa_lista.csv",
+                        mime="text/csv",
+                    )
+            
+            # Completar progreso
+            status_text.text("Procesamiento completo!")
+            progress_bar.progress(100)
 
-# Tab3: Consulta por Múltiples CUITs
 with tab3:
     st.header("Consulta por Múltiples CUITs")
     st.write("Ingrese múltiples CUITs para procesar todos sus RENSPA de una vez.")
@@ -853,25 +900,319 @@ with tab3:
     # Botón para procesar
     if st.button("Procesar Múltiples CUITs", key="btn_multi_cuit") and cuit_list:
         with st.spinner('Procesando múltiples CUITs...'):
-            # Aquí va el código de procesamiento de múltiples CUITs
-            # (Omitido por brevedad pero debe incluirse en el archivo final)
-            pass
-
-
-# Información en la barra lateral
-st.sidebar.markdown("---")
-
-# Mostrar información sobre Google Earth Engine si está disponible
-if ee_disponible:
-    mostrar_info_earth_engine_sidebar()
-else:
-    st.sidebar.subheader("Google Earth Engine")
-    st.sidebar.warning("Google Earth Engine no está disponible")
-    st.sidebar.info(
-        "Para habilitar el análisis de cultivos históricos, instala las siguientes dependencias:\n"
-        "```\npip install earthengine-api geemap\n```"
-    )
+            # Crear barras de progreso
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Procesamiento para cada CUIT
+            poligonos_gee = []
+            todos_renspa = []
+            cuits_normalizados = []
+            cuit_colors = {}
+            
+            # Normalizar CUITs
+            for cuit in cuit_list:
+                try:
+                    cuit_normalizado = normalizar_cuit(cuit)
+                    cuits_normalizados.append(cuit_normalizado)
+                    
+                    # Asignar un color aleatorio para este CUIT
+                    if multi_cuit_color:
+                        r = random.randint(0, 200)
+                        g = random.randint(0, 200)
+                        b = random.randint(0, 200)
+                        cuit_colors[cuit_normalizado] = f'#{r:02x}{g:02x}{b:02x}'
+                except ValueError as e:
+                    st.error(f"CUIT inválido: {cuit}. {str(e)}")
+            
+            # Verificar que haya CUITs válidos
+            if not cuits_normalizados:
+                st.error("No se proporcionaron CUITs válidos.")
+                st.stop()
+            
+            # Procesar cada CUIT
+            for i, cuit in enumerate(cuits_normalizados):
+                # Actualizar progreso
+                progress_percentage = (i * 70) // len(cuits_normalizados)
+                progress_bar.progress(progress_percentage)
+                status_text.text(f"Procesando CUIT: {cuit} ({i+1}/{len(cuits_normalizados)})")
+                
+                # Obtener todos los RENSPA para este CUIT
+                renspa_cuit = obtener_renspa_por_cuit(cuit)
+                
+                if renspa_cuit:
+                    # Añadir el CUIT a cada registro para identificación
+                    for renspa in renspa_cuit:
+                        renspa['cuit'] = cuit
+                    
+                    # Añadir a la lista total
+                    todos_renspa.extend(renspa_cuit)
+                    
+                    # Filtrar por activos si se solicita
+                    if multi_solo_activos:
+                        renspa_a_procesar = [r for r in renspa_cuit if r.get('fecha_baja') is None]
+                    else:
+                        renspa_a_procesar = renspa_cuit
+                    
+                    # Procesar polígonos de este CUIT
+                    for renspa_item in renspa_a_procesar:
+                        renspa = renspa_item['renspa']
+                        
+                        # Verificar si ya tiene el polígono en la información básica
+                        if 'poligono' in renspa_item and renspa_item['poligono']:
+                            poligono_str = renspa_item['poligono']
+                            superficie = renspa_item.get('superficie', 0)
+                            
+                            # Extraer coordenadas
+                            coordenadas = extraer_coordenadas(poligono_str)
+                            
+                            if coordenadas:
+                                # Crear objeto con datos del polígono
+                                poligono_data = {
+                                    'renspa': renspa,
+                                    'coords': coordenadas,
+                                    'superficie': superficie,
+                                    'titular': renspa_item.get('titular', ''),
+                                    'localidad': renspa_item.get('localidad', ''),
+                                    'cuit': cuit
+                                }
+                                poligonos_gee.append(poligono_data)
+                                continue
+                        
+                        # Si no tenía polígono o no era válido, consultar más detalles
+                        resultado = consultar_renspa_detalle(renspa)
+                        
+                        if resultado and 'items' in resultado and resultado['items'] and 'poligono' in resultado['items'][0]:
+                            item_detalle = resultado['items'][0]
+                            poligono_str = item_detalle.get('poligono')
+                            superficie = item_detalle.get('superficie', 0)
+                            
+                            if poligono_str:
+                                # Extraer coordenadas
+                                coordenadas = extraer_coordenadas(poligono_str)
+                                
+                                if coordenadas:
+                                    # Crear objeto con datos del polígono
+                                    poligono_data = {
+                                        'renspa': renspa,
+                                        'coords': coordenadas,
+                                        'superficie': superficie,
+                                        'titular': renspa_item.get('titular', ''),
+                                        'localidad': renspa_item.get('localidad', ''),
+                                        'cuit': cuit
+                                    }
+                                    poligonos_gee.append(poligono_data)
+                        
+                        # Pausa breve para no sobrecargar la API
+                        time.sleep(TIEMPO_ESPERA)
+            
+            # Crear DataFrame con todos los RENSPA
+            df_renspa = pd.DataFrame(todos_renspa)
+            
+            # Actualizar progreso
+            status_text.text("Generando visualizaciones...")
+            progress_bar.progress(80)
+            
+            # Mostrar estadísticas
+            st.subheader("Resultados del procesamiento")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("CUITs procesados", len(cuits_normalizados))
+            with col2:
+                st.metric("RENSPA obtenidos", len(todos_renspa))
+            with col3:
+                st.metric("RENSPA con polígono", len(poligonos_gee))
+            
+            # Mostrar datos en tabla
+            st.subheader("Detalles de RENSPA")
+            if not df_renspa.empty:
+                st.dataframe(df_renspa)
+            else:
+                st.warning("No se pudo obtener información para ninguno de los CUITs proporcionados.")
+            
+            # Panel de estadísticas
+            if not df_renspa.empty:
+                mostrar_estadisticas(df_renspa, poligonos_gee)
+            
+            # Visualizar en mapa
+            if poligonos_gee and folium_disponible:
+                st.subheader("Visualización de polígonos")
+                
+                # Crear mapa mejorado con colores por CUIT
+                m = crear_mapa_mejorado(poligonos_gee, cuit_colors=cuit_colors if multi_cuit_color else None)
+                
+                # Mostrar el mapa
+                folium_static(m, width=1000, height=600)
+                
+                # Preparar archivos para descarga
+                status_text.text("Preparando archivos para descarga...")
+                progress_bar.progress(90)
+                
+                # Crear archivo KML
+                kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+  <name>RENSPA - Múltiples CUITs</name>
+  <description>Polígonos de RENSPA para múltiples CUITs</description>
+"""
+                
+                # Añadir estilos para cada CUIT
+                if multi_cuit_color:
+                    for cuit, color in cuit_colors.items():
+                        # Convertir color de hex a KML (aabbggrr)
+                        color_hex = color.lstrip('#')
+                        r = color_hex[0:2]
+                        g = color_hex[2:4]
+                        b = color_hex[4:6]
+                        kml_color = f"7f{b}{g}{r}"  # 7f de transparencia
+                        
+                        cuit_clean = cuit.replace('-', '_')
+                        kml_content += f"""
+  <Style id="style_{cuit_clean}">
+    <LineStyle>
+      <color>ff{b}{g}{r}</color>
+      <width>3</width>
+    </LineStyle>
+    <PolyStyle>
+      <color>{kml_color}</color>
+    </PolyStyle>
+  </Style>
+"""
+                else:
+                    # Estilo único para todos
+                    kml_content += """
+  <Style id="defaultStyle">
+    <LineStyle>
+      <color>ff009900</color>
+      <width>3</width>
+    </LineStyle>
+    <PolyStyle>
+      <color>7f00ff00</color>
+    </PolyStyle>
+  </Style>
+"""
+                
+                # Añadir cada polígono al KML
+                for pol in poligonos_gee:
+                    # Determinar estilo
+                    if multi_cuit_color:
+                        cuit_clean = pol['cuit'].replace('-', '_')
+                        style_url = f"#style_{cuit_clean}"
+                    else:
+                        style_url = "#defaultStyle"
+                    
+                    kml_content += f"""
+  <Placemark>
+    <name>{pol['renspa']}</name>
+    <description><![CDATA[
+      <b>RENSPA:</b> {pol['renspa']}<br/>
+      <b>CUIT:</b> {pol['cuit']}<br/>
+      <b>Titular:</b> {pol['titular']}<br/>
+      <b>Localidad:</b> {pol['localidad']}<br/>
+      <b>Superficie:</b> {pol['superficie']} ha
+    ]]></description>
+    <styleUrl>{style_url}</styleUrl>
+    <Polygon>
+      <extrude>1</extrude>
+      <altitudeMode>clampToGround</altitudeMode>
+      <outerBoundaryIs>
+        <LinearRing>
+          <coordinates>
+"""
+                    
+                    # Añadir coordenadas
+                    for coord in pol['coords']:
+                        lon = coord[0]
+                        lat = coord[1]
+                        kml_content += f"{lon},{lat},0\n"
+                    
+                    kml_content += """
+          </coordinates>
+        </LinearRing>
+      </outerBoundaryIs>
+    </Polygon>
+  </Placemark>
+"""
+                
+                # Cerrar documento KML
+                kml_content += """
+</Document>
+</kml>
+"""
+                
+                # Crear archivo KMZ (ZIP que contiene el KML)
+                kmz_buffer = BytesIO()
+                with zipfile.ZipFile(kmz_buffer, 'w', zipfile.ZIP_DEFLATED) as kmz:
+                    kmz.writestr("doc.kml", kml_content)
+                
+                kmz_buffer.seek(0)
+                
+                # Crear también un GeoJSON
+                geojson_data = {
+                    "type": "FeatureCollection",
+                    "features": []
+                }
+                
+                for pol in poligonos_gee:
+                    feature = {
+                        "type": "Feature",
+                        "properties": {
+                            "renspa": pol['renspa'],
+                            "cuit": pol['cuit'],
+                            "titular": pol['titular'],
+                            "localidad": pol['localidad'],
+                            "superficie": pol['superficie']
+                        },
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [pol['coords']]
+                        }
+                    }
+                    geojson_data["features"].append(feature)
+                
+                geojson_str = json.dumps(geojson_data, indent=2)
+                
+                # Preparar CSV con todos los datos
+                if not df_renspa.empty:
+                    csv_data = df_renspa.to_csv(index=False).encode('utf-8')
+                else:
+                    csv_data = "No hay datos disponibles".encode('utf-8')
+                
+                # Opciones de descarga
+                st.subheader("Descargar resultados")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.download_button(
+                        label="Descargar KMZ",
+                        data=kmz_buffer,
+                        file_name="renspa_multiples_cuits.kmz",
+                        mime="application/vnd.google-earth.kmz",
+                    )
+                
+                with col2:
+                    st.download_button(
+                        label="Descargar GeoJSON",
+                        data=geojson_str,
+                        file_name="renspa_multiples_cuits.geojson",
+                        mime="application/json",
+                    )
+                
+                with col3:
+                    st.download_button(
+                        label="Descargar CSV",
+                        data=csv_data,
+                        file_name="renspa_multiples_cuits.csv",
+                        mime="text/csv",
+                    )
+            
+            # Completar progreso
+            status_text.text("Procesamiento completo!")
+            progress_bar.progress(100)
 
 # Información en el pie de página
 st.sidebar.markdown("---")
 st.sidebar.info("Desarrollado para análisis agrícola en Argentina")
+
+
